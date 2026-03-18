@@ -32,7 +32,12 @@ public class Sender {
     /** Congestion window (packets). Start at 2 to avoid filling small buffers (level 1–2); grow for level 3+. */
     private int cwnd = 2;
     private static final int MIN_CWND = 2;
-    private static final int MAX_CWND = 8;
+    /** Cap so in-flight bytes stay under 64KB buffer (8-2). */
+    private static final int MAX_CWND = 42;
+    /** Slow-start threshold: after timeout we back off and grow slowly (better for 8-1 with loss). */
+    private int ssthresh = MAX_CWND;
+    /** In congestion avoidance, count acks until we add 1 to cwnd (additive increase). */
+    private int caAckCount = 0;
 
     /** RTT estimation (seconds). Start low to converge quickly on low-latency links. */
     private double estimatedRTT = 0.3;
@@ -162,6 +167,7 @@ public class Sender {
             for (int s = base; s < ackNum; s++) {
                 unacked.remove(s);
             }
+            int ackedCount = ackNum - base;
             base = ackNum;
             if (unacked.isEmpty()) {
                 timerRunning = false;
@@ -169,7 +175,15 @@ public class Sender {
                 baseSendTime = now;
                 baseRetransmitTime = now;
             }
-            cwnd = Math.min(MAX_CWND, cwnd + 1);
+            if (cwnd < ssthresh) {
+                cwnd = Math.min(MAX_CWND, cwnd + ackedCount);
+            } else {
+                caAckCount += ackedCount;
+                if (caAckCount >= cwnd) {
+                    cwnd = Math.min(MAX_CWND, cwnd + 1);
+                    caAckCount = 0;
+                }
+            }
         }
     }
 
@@ -180,9 +194,11 @@ public class Sender {
             try {
                 byte[] payload = unacked.get(base);
                 if (payload != null) {
+                    ssthresh = Math.max(MIN_CWND, cwnd / 2);
+                    cwnd = MIN_CWND;
+                    caAckCount = 0;
                     sendSegment(base, payload);
                     baseRetransmitTime = now;
-                    cwnd = Math.max(MIN_CWND, cwnd / 2);
                 }
             } catch (IOException e) {
                 log("Retransmit error: " + e.getMessage());
