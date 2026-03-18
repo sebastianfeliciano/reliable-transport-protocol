@@ -1,3 +1,9 @@
+// NOTE:
+// The starter code uses a gson encoder for JSON serialization and deserialization. 
+// You may replace this with another JSON library of your choice, such as: org.json, Jackson
+// Ensure that your chosen library correctly encodes and decodes messages while maintaining 
+// the expected structure required by the simulator.
+
 import java.io.*;
 import java.net.*;
 import java.nio.*;
@@ -6,13 +12,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 
-/**
- * Reliable transport sender: sliding window, timeout, RTT estimation, retransmission.
- * Reads data from STDIN, sends to recv_host:recv_port via UDP, exits when all data acked.
- */
-public class Sender {
-    private static final int MAX_DATA_LEN = Packet.MAX_DATA_LEN;
 
+public class Sender {
+    // Constants
+    private static final int MAX_DATA_LEN = Packet.MAX_DATA_LEN;
     private final String host;
     private final int port;
     private final DatagramChannel channel;
@@ -68,6 +71,7 @@ public class Sender {
         selector = Selector.open();
         channel.register(selector, SelectionKey.OP_READ);
         updateTimeout();
+        log("Sender starting up using port " + port);
         log("Sender starting up, sending to " + host + ":" + port);
     }
 
@@ -76,6 +80,7 @@ public class Sender {
         System.err.flush();
     }
 
+    // Update the timeout based on the estimated RTT and devRTT
     private void updateTimeout() {
         timeoutMs = (long) Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, (estimatedRTT + 4 * devRTT) * 1000));
     }
@@ -83,29 +88,29 @@ public class Sender {
     private void startInputThread() {
         Thread t = new Thread(() -> {
             try {
+
                 byte[] buf = new byte[MAX_DATA_LEN * 2];
                 InputStream in = System.in;
                 while (true) {
-                    int n = in.read(buf);
-                    if (n == -1) {
+                    int count = in.read(buf);
+                    if (count == -1) {
                         inputChunks.put(EOF_MARKER);
                         break;
                     }
-                    if (n > 0) {
-                        inputChunks.put(Arrays.copyOf(buf, n));
+                    if (count > 0) {
+                        inputChunks.put(Arrays.copyOf(buf, count));
                     }
                 }
-            } catch (IOException e) {
-                log("Input error: " + e.getMessage());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            } catch (IOException | InterruptedException e) {
+                e.printStackTrace();
             }
         });
+        // Set the thread to daemon so it doesn't block the main thread
         t.setDaemon(true);
         t.start();
     }
 
-    /** Drain input into segments (each up to MAX_DATA_LEN). */
+    // Drain input into segments (each up to MAX_DATA_LEN).
     private void drainInput() {
         while (!eof) {
             byte[] chunk = inputChunks.poll();
@@ -114,8 +119,10 @@ public class Sender {
                 eof = true;
                 break;
             }
+            // Add the chunk to the list
             int offset = 0;
             while (offset < chunk.length) {
+                // Add the chunk to the list
                 int len = Math.min(MAX_DATA_LEN, chunk.length - offset);
                 segments.add(Arrays.copyOfRange(chunk, offset, offset + len));
                 offset += len;
@@ -123,13 +130,17 @@ public class Sender {
         }
     }
 
+    // Send a segment to the receiver
     private void sendSegment(int seq, byte[] payload) throws IOException {
         byte[] packet = Packet.makeData(seq, payload, 0, payload.length);
         if (remoteAddress == null) {
             remoteAddress = new InetSocketAddress(host, port);
         }
+        // Send the packet to the receiver
         channel.send(ByteBuffer.wrap(packet), remoteAddress);
+        // Add the packet to the unacked map
         unacked.put(seq, payload);
+        // If the sequence number is the base, start the timer
         if (seq == base) {
             baseSendTime = System.currentTimeMillis();
             baseRetransmitTime = baseSendTime;
@@ -137,11 +148,14 @@ public class Sender {
         }
     }
 
+    // Receive an ACK from the receiver
     private void receive() throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(65535);
         SocketAddress addr = channel.receive(buffer);
         if (addr == null) return;
+        // Set the remote address if it's not set
         if (remoteAddress == null) remoteAddress = (InetSocketAddress) addr;
+        // If the address is not the remote address, ignore the packet
         if (!addr.equals(remoteAddress)) {
             log("Received from unexpected remote; ignoring");
             return;
@@ -152,10 +166,14 @@ public class Sender {
         byte[] bytes = new byte[len];
         buffer.get(bytes);
 
+        // Parse the ACK number
         int ackNum = Packet.parseAck(bytes, len);
+        // If the ACK number is less than 0, ignore the packet
         if (ackNum < 0) return;
 
+        // If the ACK number is less than or equal to the base, ignore the packet
         if (ackNum <= base) return;
+        // If the ACK number is greater than the base, process the packet
         if (ackNum > base) {
             long now = System.currentTimeMillis();
             double sampleRTT = (now - baseSendTime) / 1000.0;
@@ -164,10 +182,13 @@ public class Sender {
                 devRTT = (1 - BETA) * devRTT + BETA * Math.abs(sampleRTT - estimatedRTT);
                 updateTimeout();
             }
+            // Remove the unacked packets
             for (int s = base; s < ackNum; s++) {
                 unacked.remove(s);
             }
+            // Get the number of packets acknowledged
             int ackedCount = ackNum - base;
+            // Set the base to the ACK number
             base = ackNum;
             if (unacked.isEmpty()) {
                 timerRunning = false;
@@ -175,6 +196,7 @@ public class Sender {
                 baseSendTime = now;
                 baseRetransmitTime = now;
             }
+            // If the congestion window is less than the slow start threshold, increase the congestion window
             if (cwnd < ssthresh) {
                 cwnd = Math.min(MAX_CWND, cwnd + ackedCount);
             } else {
@@ -187,6 +209,7 @@ public class Sender {
         }
     }
 
+    // Check if the timeout has expired
     private void checkTimeout() {
         if (!timerRunning || !unacked.containsKey(base)) return;
         long now = System.currentTimeMillis();
@@ -248,7 +271,6 @@ public class Sender {
             Sender sender = new Sender(host, port);
             sender.run();
         } catch (IOException e) {
-            System.err.println("Sender error: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         }

@@ -1,30 +1,37 @@
 # Reliable Transport Protocol (4700send / 4700recv)
 
-## High-level approach
+This project implements a reliable transport layer on top of UDP — delivering data in order, handling packet loss, and recovering from corruption.
 
-This project implements a UDP-based reliable transport with in-order, loss-tolerant, and corruption-tolerant delivery.
+## How it works
 
-- **Packet format**: Binary (not JSON) to keep overhead low and stay under the 1500-byte datagram limit. Data packets: type (1), seq (4), data length (2), payload, checksum (2). ACK packets: type (1), ack number (4), checksum (2).
-- **Checksum**: 16-bit one’s-complement sum over the packet (checksum field zeroed). Used to detect corruption (mangled packets); invalid packets are dropped at sender and receiver.
-- **Sender**: Sliding window (Go-Back-N style). Reads STDIN in chunks, splits into segments of at most 1491 data bytes, sends with sequence numbers. Maintains unacked segments and retransmits on timeout. RTT is estimated with an exponential moving average; timeout = estimated RTT + 4×dev RTT (clamped). Congestion control: window starts at 2; slow-start (exponential-style growth) until ssthresh; on timeout, ssthresh = cwnd/2 and cwnd = 2; above ssthresh, additive increase (about +1 per RTT). MAX_CWND = 42 to fill the pipe on high-bandwidth configs while staying under 64KB buffer.
-- **Receiver**: Cumulative ACK. Buffers out-of-order segments in a `TreeMap` and delivers in order to STDOUT. Sends ACK for every valid data segment (including duplicates) so the sender can detect loss. First line to STDERR is `Bound to port <port>` as required.
+**Packet format** — I went with a binary format rather than something like JSON. It keeps overhead low and makes it easy to stay under the 1500-byte datagram limit. Data packets carry a type byte, a 4-byte sequence number, a 2-byte length field, the payload, and a 2-byte checksum at the end. ACKs are just type + ack number + checksum.
+
+**Checksum** — Standard 16-bit one's-complement sum over the whole packet (with the checksum field zeroed out during computation). Any packet that fails the check gets silently dropped, both at the sender and receiver.
+
+**Sender** — Sliding window approach. Reads from STDIN in chunks, slices them into segments of up to 1491 bytes, and sends them with sequence numbers. Unacknowledged segments are held in memory and retransmitted on timeout. Timeout is computed as estimated RTT + 4×RTT deviation, updated via exponential moving average. For congestion control: the cwnd starts at 2, grows exponentially during slow start, then switches to additive increase once it crosses ssthresh. On a timeout, ssthresh is halved and cwnd resets to 2. MAX_CWND is capped at 42 — enough to fill the pipe on high-bandwidth configs without blowing past the 64KB buffer limit.
+
+**Receiver** — Cumulative ACK only (no selective ACK). Out-of-order segments are buffered in a `TreeMap` and flushed in order to STDOUT as gaps get filled. Every valid data segment — including duplicates - gets ACKed so the sender can detect loss properly.
 
 ## Challenges
 
-- **Level 1 vs level 3**: Level 1 needs a small window (e.g. 2) so the router queue does not overflow; level 3 needs a window of at least 4. Using an initial cwnd of 2 and allowing slow growth (e.g. +1 per ACK) lets both pass.
-- **Level 6 (latency)**: With a fixed 1 s timeout, low-RTT links waited too long after losses. Using a lower initial RTT estimate (e.g. 0.3 s) and a smaller initial timeout (e.g. 700 ms) lets the sender converge quickly on low-latency configs while still behaving on high-latency ones.
-- **Checksum placement**: Checksum is at the end of each packet so a single verification path works for both DATA and ACK and so we can verify before trusting the length field.
+The hardest part of this project was getting the last 3 (8 type) configs to pass. Performance was the main bottleneck — early implementations were either too conservative (timing out too slowly on low-latency links) or too aggressive (overflowing  queues on constrained ones).
 
-## Design properties
+A few specific pain points:
 
-- **Correctness**: Sequence numbers and cumulative ACK give in-order, no-duplicate delivery; checksums reject corrupted packets; timeouts and retransmissions handle loss.
-- **Low overhead**: Binary packets and 7–9 byte headers reduce bytes-on-the-wire compared to a JSON-based protocol.
-- **Adaptability**: RTT estimation and timeouts adapt to delay; cwnd backs off on timeout and grows on ACKs to suit different bandwidth/buffer conditions.
+**Balancing level 1 vs. level 3** — Level 1 has a small router queue that overflows if you send aggressively; level 3 needs a window of at least 4 to pass. Starting with cwnd = 2 and growing slowly (roughly +1 per ACK) works for both.
+
+**Level 6 (latency sensitivity)** — A fixed 1-second timeout was way too conservative on low-latency links: after a loss, the sender would just sit there waiting. 
+
+**Checksum placement** — Placing the checksum last means one verification path handles both DATA and ACK packets, and we can validate before trusting the length field. Seemed cleaner than having separate logic per packet type.
+
+## Design notes
+
+- **Correctness**: Sequence numbers + cumulative ACK give in-order, duplicate-free delivery. Checksums reject corruption. Timeouts + retransmission handle loss.
+- **Low overhead**: Binary headers are 7–9 bytes vs. the heavy JSON alternative.
+- **Adaptability**: RTT estimation adjusts timeouts dynamically; the congestion window backs off on loss and grows on ACKs to handle a range of bandwidth/buffer conditions.
 
 ## Testing
 
-- **Automated**: Run `./test` (or `python3 test`) to exercise all provided configs (levels 1–8). All 19 configs should report `[PASS]`.
-- **Single run**: `./run configs/<config>.conf` runs one scenario and prints simulator logs and final stats (success/failure and byte/packet counts).
-- **Manual**: Start receiver (`./4700recv`), note the printed port, then run sender with that host/port and pipe input, e.g. `echo "hello" | ./4700send 127.0.0.1 <port>`.
+**Full suite**: Run `./test` to run all 19 configs across levels 1–8. All should report `[PASS]`.
 
-No modifications were made to the provided `run` script or the files in `configs/`.
+**Single config**: `./run configs/<config>.conf` runs one scenario and prints simulator logs plus final stats (success/failure, byte/packet counts).
