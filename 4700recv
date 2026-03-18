@@ -1,0 +1,2 @@
+#!/bin/bash
+exec java -jar receiver4700.jar "$@"
