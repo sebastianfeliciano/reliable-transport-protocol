@@ -14,7 +14,7 @@ This project implements a reliable transport layer on top of UDP — delivering 
 
 ## Challenges
 
-The hardest part of this project was getting the last 3 (8 type) configs to pass. Performance was the main bottleneck — early implementations were either too conservative (timing out too slowly on low-latency links) or too aggressive (overflowing  queues on constrained ones).
+The hardest part of this project was getting the last 3 (8 type) configs to pass. Performance was the hardest problem.
 
 A few specific pain points:
 
